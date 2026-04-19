@@ -1,0 +1,24 @@
+id,stimuli,n_repetition,realign,age,gender,origin,lived_elsewhere,aligner_language,dialect
+01,1,2,,24,m,Buckinghamshire,,GB,SBE
+02,2,2,,21,m,,,GB,SC
+03,3,2,,26,m,Devon,,GB,SBE
+04,3,2,,22,m,Northern Ireland,,GB,IE
+05,4,2,,62,m,Edinburgh,,SC,SC
+06,3,1,,66,f,Edinburgh,,SC,SC
+07,5,,,67,f,Liverpool,Edinburgh,GB,Liverpool
+08,2,,,26,f,London,Middle East,GB,SBE
+09,4,,,23,f,Somerset (Bath),,GB,SBE
+10,5,,,21,f,Edinburgh,,SC,SC
+11,2,,1,54,f,Edinburgh,,SC,SC
+12,3,1,,79,f,Warwickshire,London,GB,SBE
+13,4,,1,68,f,Suffolk (Felixstowe),"Sheffield, Edinburgh",GB,SBE
+14,5,1,,21,f,Aberdeenshire,,GB,SC
+15,1,,1,19,f,Aberdeenshire,,GB,SC
+16,1,,,22,f,Aberdeenshire,,GB,SC
+17,2,,1,22,f,Merseyside (Wirral),,GB,Liverpool
+18,1,,,26,f,Durham,,GB,NBE
+19,4,1,,76,f,Edinburgh,,SC,SC
+20,5,1,,19,f,Somerset (Bath),,GB,SBE
+21,3,1,,33,f,India,,IN,IN
+22,4,2,1,26,m,Durham,,GB,NBE
+23,1,2,1,23,f,Ireland,,GB,IE
