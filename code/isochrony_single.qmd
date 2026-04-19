@@ -1,0 +1,344 @@
+---
+title: "isochrony"
+---
+
+```{r, message=FALSE,warning=FALSE}
+library(brms)
+library(tidyverse)
+library(rticulate)
+library(rcartocolor)
+library(ggpubr)
+library(ggpmisc)
+library(modelbased)
+```
+
+## A single participant - smooth Y signal for them
+```{r} 
+en00_tongue <- dlc_tongue |>
+  filter(client  == "en01")
+en00_tongue_up <- dlc_tongue_up |>
+  filter(client == "en01")
+```
+
+### Before resampling -- only visualisation
+```{r} 
+en00_tongue |> select(time_annot, Y, Y_sm)
+
+en00_tongue |> 
+  filter(knot == "10") |> 
+  ggplot(aes(time_annot, Y, group = date_time)) +
+  geom_line(alpha = 0.05) +
+  geom_line(aes(y = Y_sm), alpha = 0.05, colour = "purple")
+
+set.seed(13579)
+kdi <- sample(unique(en00_tongue$displ_id), 9)
+
+c <- unlist(distinct(en09_tongue |> filter(displ_id %in% kdi) |> select(word)), use.names = F)
+c <- paste(c,(sort(kdi) %% 15)-4)
+names(c) <- as.character(sort(kdi))
+en00_tongue |> 
+  filter(displ_id %in% kdi) |> 
+  ggplot(aes(time_annot, Y)) +
+  geom_line() +
+  geom_point(aes(y = Y_sm), colour = "red") +
+  facet_wrap(vars(displ_id), scales = "free", labeller = as_labeller(c))
+
+```
+
+## After resampling -- only visualisation
+```{r}
+en00_tongue_up |> 
+  filter(knot == 5) |> 
+  ggplot(aes(time_int, Y_sm_up, group = displ_id)) +
+  geom_point(alpha = 0.05, color = "palegreen") +
+  geom_line(alpha = 0.05, color = "palegreen")
+
+en00_tongue_up |> 
+  filter(knot == 5, displ_id == 9) |> 
+  ggplot(aes(time_int, Y_sm_up_sm, group = displ_id)) +
+    geom_point(alpha = 0.25) +
+    geom_line()
+```
+
+## Kinematics
+### Check knot trajectories for a given pair of words by a given speaker
+```{r}
+word_lookup <- function(speaker,word1,rep=1) {
+  a <- dlc_tongue_up |>
+    filter(client == speaker)
+  a |>
+    group_by(date_time) |>
+    filter(word == word1) |>
+    summarise(min = min(displ_id), max = max(displ_id)) |>
+    slice(rep) -> b
+  a |>
+    filter(displ_id > unlist(b["min"]-1) & displ_id < unlist(b["max"]+1)) |>
+    ggplot(aes(time_int, Y_sm_up_sm)) +
+      geom_point(alpha = 0.2) +
+      facet_grid(rows = vars(displ_id), scales = "free_y")
+}
+petition <- word_lookup("en10","aggadic",2)
+patrician <- word_lookup("en10","agraphic",2)
+ggarrange(petition,patrician,ncol=2)
+```
+
+### Mark onset and offset based on annotation for a given word
+```{r}
+show_where_to_get_landmarks <- function(speaker, word1, rep = 1, knot1 = 10) {
+  a <- dlc_tongue_up |>
+    filter(client == speaker)
+  min1 <- a |> 
+      filter(word == word1) |>
+      select(start_of_vowel_within_annot_1) |>
+      distinct() |>
+      slice(rep) |>
+      unlist()
+  max1 <- a |> 
+      filter(word == word1) |>
+      select(end_of_vowel_within_annot_1) |>
+      distinct() |>
+      slice(rep) |>
+      unlist()
+  min2 <- a |> 
+      filter(word == word1) |>
+      select(start_of_vowel_within_annot_2) |>
+      distinct() |>
+      slice(rep) |>
+      unlist()
+  max2 <- a |> 
+      filter(word == word1) |>
+      select(end_of_vowel_within_annot_2) |>
+      distinct() |>
+      slice(rep) |>
+      unlist()
+  id1 <- a |> 
+      filter(word == word1 & knot == knot1) |>
+      select(displ_id) |>
+      distinct() |>
+      slice(rep) |>
+      unlist()
+  # get_min1(word, rep) -> min1
+  # get_max1(word, rep) -> max1
+  # get_id(word, rep, knot) -> id1
+  # get_min2(word, rep) -> min2
+  # get_max2(word, rep) -> max2
+  a |>
+    filter(displ_id == id1) |> 
+    ggplot(aes(time_int, Y_sm_up_vel)) +
+      geom_point() +
+      geom_line(aes(y = abs(Y_sm_up_vel)), colour = "red") +
+      ylim(-1,1) +
+      labs(title = id1) +
+      annotate("rect", xmin = min1, xmax = max1, ymin = -Inf, ymax = Inf, alpha = 0.3) +
+      annotate("rect", xmin = min2, xmax = max2, ymin = -Inf, ymax = Inf, alpha = 0.3) -> velocity
+  a |>
+    filter(displ_id == id1) |>
+    ggplot(aes(time_int, Y_sm_up_sm)) +
+      geom_point(alpha = 0.2) +
+      labs(title = id1) +
+      annotate("rect", xmin = min1, xmax = max1, ymin = -Inf, ymax = Inf, alpha = 0.3) +
+      annotate("text", x = min1, y = 0, label = as.character(round(min1,2))) +
+      annotate("text", x = max1, y = 0, label = as.character(round(max1,2))) +
+      annotate("rect", xmin = min2, xmax = max2, ymin = -Inf, ymax = Inf, alpha = 0.3) +
+      annotate("text", x = min2, y = 0, label = as.character(round(min2,2))) +
+      annotate("text", x = max2, y = 0, label = as.character(round(max2,2))) -> displacement
+  ggarrange(displacement,velocity,nrow = 2)
+}
+show_where_to_get_landmarks("en10","aggadic",2)
+```
+
+
+### Get landmarks for a single recording
+```{r}
+# Filter signal to include a reduced time window
+reduce_window <- function(word, rep = 1, knot = 10) {
+  get_min1(word, rep) -> min1
+  get_max1(word, rep) -> max1
+  get_id(word, rep, knot) -> id1
+  en09_tongue_up |>
+    filter(displ_id == id1, time_int > min1, time_int < max1)
+}
+specify_landmarks_time <- function(word, rep = 1) {
+  get_min1(word, rep) -> min1
+  get_max1(word, rep) -> max1
+  get_landmarks(en09_up_win$Y_sm_up_vel, en09_up_win$time_int, min1, max1)
+}
+
+en09_up_win <- reduce_window("attraction",1)
+en09_up_win_land <- specify_landmarks_time("attraction",1)
+
+en09_up_win_land_long <- en09_up_win_land |> 
+  pivot_longer(everything(), names_to = "land")
+
+en09_up_win_land_long
+
+en09_up_win |> 
+  ggplot(aes(time_int, abs(get_velocity(Y_sm_up_sm)))) +
+  geom_point(colour = "red") +
+  geom_vline(data = en09_up_win_land_long |> filter(str_detect(land, "_ons|_off")), aes(xintercept = value)) +
+  labs(y = "Absolute velocity")
+
+en09_up_win |> 
+  ggplot(aes(time_int, Y_sm_up_sm)) +
+  geom_point() +
+  geom_vline(data = en09_up_win_land_long |> filter(str_detect(land, "_ons|_off")), aes(xintercept = value)) +
+  labs(y = "Y displacement")
+```
+
+### Get landmarks for all recordings of a given participant
+#### first a few functions that make displ_id identification easier
+```{r}
+landmarks_segmentinfo <- function(lands, tongue_up) {left_join(lands, dlc_tongue_up |> select(displ_id_client,word,client,date_time,file,displ_id,start1_round,end1_round,start2_round,end2_round) |> distinct(), by = join_by(displ_id_client)) |> 
+  relocate(c(word,file,start1_round,end1_round,start2_round,end2_round), .after = displ_id_client) |>
+  left_join(y = word_segments, by = join_by(word)) |>
+  relocate(stress, .after = word) |>
+  arrange(group,stress,V2,poa_C2,voice_C2,R,word)
+  }
+
+poa_na_summary <- function(landmarks_segmentinfo,var1,var2) {
+  landmarks_segmentinfo |>
+  group_by({{var1}}, {{var2}}) |>
+  summarise("_time|_vel|_on|_off",~sum(is.na(.)))
+}
+
+en00_tongue_up |>
+  select(file,word,start1_round,end1_round,start2_round,end2_round) |>
+  distinct() |>
+  count(end2_round)
+```
+
+#### Extract landmarks and check how many was successful
+```{r}
+en09_up_lands <- en09_tongue_up |> 
+    filter(knot == 10, time_int > start_of_vowel_within_annot_1+0.03, 
+           time_int < end_of_vowel_within_annot_1-0.03) |> 
+    reframe(
+      get_landmarks(Y_sm_up_vel, time_int, start_of_vowel_within_annot_1+0.03, end_of_vowel_within_annot_1-0.03),
+      .by = displ_id_client
+    )
+
+en09_up_lands_segmentinfo <- landmarks_segmentinfo(en09_up_lands, en09_tongue_up)
+poa_na_summary(en09_up_lands_segmentinfo)[c(1,2,11:20)]
+poa_na_summary_stress(en09_up_lands_segmentinfo)
+```
+
+```{r}
+en09_peak_valley <- en09_tongue_up |>
+  mutate(
+    peaks = find_peaks(en09_tongue_up[["Y_sm_up_vel"]]),
+    valleys = find_valleys(en09_tongue_up[["Y_sm_up_vel"]]),
+    #spikes = find_spikes(en09_tongue_up[["Y_sm_up_vel"]])
+    zeros = 1
+  ) |>
+  relocate(c(peaks,valleys), .after = Y_sm_up_vel) |>
+  filter(knot == 10) 
+
+en09_peak_valley |> filter(peaks == T | valleys == T)
+```
+
+```{r}
+zero_crossings(en09_tongue_up |> filter(displ_id == 14) |> select(Y_sm_up_vel) |> unlist())
+zeros <- as_tibble(displ_id = numeric(), )
+for (i in nrow(en09_peak_valley)) {
+  a <- as_tibble(c, nrow = 1)
+  add_ro
+}
+```
+
+### Visualise landmarks for a sample of recordings
+```{r}
+en09_up_lands_long <- en09_up_lands_segmentinfo |> 
+  pivot_longer(5:22, names_to = "land") |>
+  relocate(c(land,value), .after = displ_id)
+
+sample_displ_id <- sample(en09_up_lands |> drop_na() |> left_join(en09_up_lands_segmentinfo |> select(displ_id,poa_C2)) |> filter(poa_C2 != "bilabial") |> select(displ_id) |> unlist(),9)
+
+en09_tongue_up |> 
+  filter(displ_id %in% sample_displ_id) |> 
+  ggplot(aes(time_int, Y_sm_up_sm)) +
+    geom_point(alpha = 0.2) +
+    geom_vline(data = en09_up_lands_long |> 
+                   filter(displ_id %in% sample_displ_id) |> filter(str_detect(land, "_ons|_off")), aes(xintercept = value)) +
+    geom_vline(data = en09_up_lands_long |> 
+                  filter(displ_id %in% sample_displ_id) |> filter(str_detect(land, "_round")), aes(xintercept = value), colour = "red") +
+    xlim(0, 0.75) +
+    facet_wrap(vars(word,displ_id), scales = "free_y") +
+    guides(colour = "none")
+```
+
+### Get landmarks again with slightly modified boundaries 
+```{r}
+en09_up_lands_second <- en09_up_lands_segmentinfo |>
+  filter(is.na(max_disp_time)) |>
+  select(displ_id) |>
+  left_join(y = en09_tongue_up, by = join_by(displ_id)) |>
+  filter(time_int > start_of_vowel_within_annot_1-0.02, 
+         time_int < end_of_vowel_within_annot_1 + 0.05) |> 
+  reframe(
+    get_landmarks(Y_sm_up_vel, time_int, start_of_vowel_within_annot_1-0.02, end_of_vowel_within_annot_1+0.05),
+    .by = displ_id
+  ) |>
+  arrange(displ_id)
+
+en09_up_lands_second_segmentinfo <- landmarks_segmentinfo(en09_up_lands_second)
+poa_na_summary(en09_up_lands_second_segmentinfo)
+```
+```{r}
+en09_up_lands_second_long <- en09_up_lands_second_segmentinfo |> 
+  pivot_longer(5:20, names_to = "land") |>
+  relocate(c(land,value), .after = displ_id)
+
+non_bilabial_second <- en09_up_lands_second |> drop_na(matches("_time|_vel")) |> left_join(en09_up_lands_second_segmentinfo |> select(displ_id,poa_C2)) |> filter(poa_C2 != "bilabial")
+sample_displ_id_second <- sample(non_bilabial_second |> select(displ_id),if (nrow(non_bilabial_second) < 9) {nrow(non_bilabial_second)} else {9})
+
+en09_tongue_up |> 
+  filter(displ_id %in% sample_displ_id_second) |> 
+  ggplot(aes(time_int, Y_sm_up_sm)) +
+    geom_point(alpha = 0.2) +
+    geom_vline(data = en09_up_lands_second_long |> 
+                   filter(displ_id %in% sample_displ_id_second) |> filter(str_detect(land, "_ons|_off")), aes(xintercept = value)) +
+    geom_vline(data = en09_up_lands_second_long |> 
+                   filter(displ_id %in% sample_displ_id_second) |> filter(str_detect(land, "_round")), aes(xintercept = value), colour = "red") +
+    #ylim(-1, 1) +
+    facet_wrap(vars(word), scales = "free_y") +
+    guides(colour = "none")
+```
+
+
+
+### Get landmarks for the second vowel
+```{r}
+en09_up_lands_2 <- en09_tongue_up |> 
+    filter(knot == 10, time_int > start_of_vowel_within_annot_2*0.8, 
+           time_int < end_of_vowel_within_annot_2*1.1) |> 
+    reframe(
+      get_landmarks(Y_sm_up_vel, time_int, start_of_vowel_within_annot_2*0.9, end_of_vowel_within_annot_2),
+      .by = displ_id
+    )
+
+en09_up_lands_segmentinfo_2 <- landmarks_segmentinfo(en09_up_lands_2)
+en09_up_lands_segmentinfo_2 |> filter(is.na(max_disp_time))
+poa_na_summary(en09_up_lands_segmentinfo_2)
+poa_na_summary_stress(en09_up_lands_segmentinfo_2)
+```
+
+```{r}
+en09_up_lands_long <- en09_up_lands_segmentinfo |> 
+  pivot_longer(5:20, names_to = "land") |>
+  relocate(c(land,value), .after = displ_id)
+
+sample_displ_id <- sample(en09_up_lands |> drop_na() |> left_join(en09_up_lands_segmentinfo |> select(displ_id,poa_C2)) |> filter(poa_C2 == "bilabial") |> select(displ_id) |> unlist(),9)
+
+en09_tongue_up |> 
+  filter(displ_id %in% sample_displ_id) |> 
+  ggplot(aes(time_int, Y_sm_up_sm)) +
+    geom_point(alpha = 0.2) +
+    geom_vline(data = en09_up_lands_long |> 
+                   filter(displ_id %in% sample_displ_id) |> filter(str_detect(land, "_ons|_off")), aes(xintercept = value)) +
+    geom_vline(data = en09_up_lands_long |> 
+                   filter(displ_id %in% sample_displ_id) |> filter(str_detect(land, "_round")), aes(xintercept = value), colour = "red") +
+    #ylim(-1, 1) +
+    facet_wrap(vars(word,displ_id), scales = "free_y") +
+    guides(colour = "none")
+```
+

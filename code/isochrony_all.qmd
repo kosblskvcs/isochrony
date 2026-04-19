@@ -1,0 +1,535 @@
+---
+title: "Wrangling and analysing the whole UTI dataset"
+author: "Ákos Blaskovics"
+format: html
+---
+
+```{r, message=FALSE,warning=FALSE}
+library(brms)
+library(tidyverse)
+library(rticulate)
+library(rcartocolor)
+library(ggpubr)
+library(ggpmisc)
+library(modelbased)
+library(posterior)
+library(ggdist)
+library(marginaleffects)
+```
+
+
+## Read UTI data
+```{r, message=FALSE}
+folder_path <- "../isochrony_data/export_isochrony_dlc"
+dlc_data <- read_rds(paste0(folder_path,"/dlc_data.rds"))
+unique(dlc_data |> group_by(frame_id) |> count(client))
+
+less_than_7_frames <- c(paste(2073:2076,"en14",sep = "_"),
+                        paste(3376:3422,"en18",sep = "_"))
+dlc_data <- dlc_data |>
+  group_by(client) |>
+  mutate(displ_id = displ_id - min(displ_id)+1,
+         frame_id = frame_id - min(frame_id)+1,
+         displ_id_client = paste(displ_id, client, sep = "_"),
+         frame_id_client = paste(frame_id, client, sep = "_")) |>
+  ungroup()
+dlc_data_displ <- dlc_data |>
+    filter(!(frame_id_client %in% less_than_7_frames))
+
+dates_to_filter <- dlc_data |>
+  filter((client == "en14" & frame_id == 2073) | (client == "en18" & frame_id == 3376) |
+           (client == "en11" & displ_id %in% c(635,2234)) | (client == "en01" & displ_id %in% c(1310,2225))) |>
+  select(date_time) |>
+  unique()
+```
+
+## Read data on vowels 
+```{r, message=FALSE}
+vowel_start_end_01 <- read_csv(paste0(folder_path,"/vowel_start_end_all_01_2.csv"))
+# vowel_start_end_01 |>
+#   group_by(date_time) |>
+#   count(n_of_vowel) |> filter(n > 1)
+# vowel_start_end_01 <- vowel_start_end_01 |>
+#   mutate(date_vowel = paste(date_time, n_of_vowel, sep = "_")) |>
+#   filter(!duplicated(date_vowel))
+# sum(duplicated(vowel_start_end_01["date_vowel"]))
+
+vowel_start_end_wide_01 <- vowel_start_end_01 |> 
+    #select(-date_vowel) |>
+    pivot_wider(
+      names_from = n_of_vowel, 
+      values_from = ends_with("_of_vowel_within_annot"),
+    )
+vowel_start_end_wide_01 <- vowel_start_end_wide_01 |> 
+  filter(!(vowel_start_end_wide_01$date_time %in% dates_to_filter$date_time))
+
+vowel_acoustics <- read_csv(paste0(folder_path,"/vowel_acoustic_distance_start.csv"))
+vowel_acoustics_wide <- vowel_acoustics |>
+    pivot_wider(
+      names_from = n_of_vowel, 
+      values_from = c(startpoint,duration),
+    )
+vowel_acoustics_wide <- vowel_acoustics_wide |> 
+  filter(!(vowel_acoustics_wide$date_time %in% dates_to_filter$date_time))
+
+word_segments <- read_csv("../isochrony_data/stimuli/isochrony_wlist_vowels.csv")
+word_segments <- word_segments |>
+  mutate(poa_C2 = case_when((C2 == "p" | C2 == "b")~"bilabial",
+                            (C2 == "t" | C2 == "d")~"alveolar",
+                            (C2 == "k" | C2 == "g")~"velar"),
+         voice_C2 = case_when((C2 %in% c("b","d","g"))~1,
+                              (C2 %in% c("p","t","k"))~0))
+
+participants <- read_csv(paste0(folder_path,"/../participants.csv"))
+participants <- participants |>
+  mutate(id = paste0("en", id))
+
+```
+
+## sampling rate 
+### almost only visual / no overwriting of data
+```{r}
+dlc_data_displ |>
+  group_by(displ_id_client) |>
+  mutate(dt = time_annot - lag(time_annot)) |>
+  summarise(mean_dt = mean(dt, na.rm = TRUE)) |>
+  summarise(mean_fs = round(mean(1/mean_dt)))
+
+dlc_data |>
+  ggplot(aes(X, Y, colour = as.factor(knot))) +
+  geom_point(alpha = 0.1) +
+  facet_wrap(vars(client), scales = "free_y", ncol = 6)
+```
+
+## For all participants, the whole data wrangling up until landmarks
+```{r}
+### only tongue knots
+dlc_tongue <- dlc_data_displ |> 
+  filter(spline == "DLC_Tongue")
+
+### smooth
+dlc_tongue <- dlc_tongue |> 
+  mutate(
+    Y_sm = filter_signal(Y, order = 2, window_length = 7, apply = 2),
+    .by = displ_id_client
+  )
+
+### resample
+dlc_tongue_up <- dlc_tongue |> 
+  reframe(
+    resample_signal(Y_sm, time_annot, by = 3),
+    .by = displ_id_client
+  )
+
+### join back other variables
+dlc_tongue_up <- dlc_tongue_up |> 
+  left_join(y = dlc_tongue |> select(client, date_time, Prompt, spline, knot, displ_id, word, displ_id_client) |> distinct()) |> 
+  rename(Y_sm_up = signal_int)
+
+### smooth
+dlc_tongue_up <- dlc_tongue_up |> 
+  mutate(
+    Y_sm_up_sm = filter_signal(Y_sm_up, order = 2, window_length = 7, apply = 2),
+    .by = displ_id_client
+  )
+
+### join vowel interval info
+dlc_tongue_up <- left_join(dlc_tongue_up |> select(-c(Prompt, spline)) |> distinct(), vowel_start_end_wide_01 |> select(-stimulus) |> distinct(), by = join_by(date_time))
+
+no_V1 <- dlc_tongue_up |>
+  filter(is.na(start_of_vowel_within_annot_1)) |>
+  select(date_time,word,file,client) |>
+  unique()
+no_V2 <- dlc_tongue_up |>
+  filter(is.na(start_of_vowel_within_annot_2)) |>
+  select(date_time,word,file,client) |>
+  unique()
+
+dlc_tongue_up <- dlc_tongue_up |>
+  filter(!(date_time %in% no_V1$date_time | date_time %in% no_V2$date_time))
+
+dlc_tongue_up <- dlc_tongue_up |>
+  mutate(across(
+    .cols = c(start_of_vowel_within_annot_1,end_of_vowel_within_annot_1,start_of_vowel_within_annot_2,end_of_vowel_within_annot_2), round, 2,
+    .names = "{.col}_round"
+    )
+  ) |>
+  rename(
+    start1_round = start_of_vowel_within_annot_1_round,
+    end1_round = end_of_vowel_within_annot_1_round,
+    start2_round = start_of_vowel_within_annot_2_round,
+    end2_round = end_of_vowel_within_annot_2_round
+  )
+
+### calculate velocity signal
+dlc_tongue_up <- dlc_tongue_up |> 
+  mutate(
+    Y_sm_up_vel = get_velocity(Y_sm_up_sm)
+  ) |>
+  relocate(c(Y_sm_up_vel,Y_sm_up_sm), .before = Y_sm_up) |>
+  relocate(c(file,word), .after = date_time)
+```
+
+### Overview functions for landmarks
+```{r}
+landmarks_segmentinfo <- function(lands, tongue_up) {left_join(lands, dlc_tongue_up |> select(displ_id_client,word,client,date_time,file,displ_id,start1_round,end1_round,start2_round,end2_round) |> distinct(), by = join_by(displ_id_client)) |> 
+  relocate(c(word,file,start1_round,end1_round,start2_round,end2_round), .after = displ_id_client) |>
+  left_join(y = word_segments, by = join_by(word)) |>
+  relocate(stress, .after = word) |>
+  arrange(group,stress,V2,poa_C2,voice_C2,R,word)
+}
+poa_na_summary <- function(landmarks_segmentinfo,both = 1,var1,var2) {
+  landmarks_segmentinfo |>
+    filter(group == 1) |>
+    group_by({{var1}}, {{var2}}) |>
+    summarise_at(ifelse(both == 1, 
+                        c("max_disp_time_1","max_disp_time_2","max_disp_distance"),
+                        "max_disp_time"),~sum(is.na(.)))
+}
+```
+
+## Get landmarks for the whole dataset (1-23)
+### V1
+```{r,message=FALSE}
+#write_csv(dlc_tongue_up, "../isochrony_data/export_isochrony_dlc/dlc_tongue_up.csv")
+dlc_tongue_up <- read_csv("../isochrony_data/export_isochrony_dlc/dlc_tongue_up.csv")
+
+dlc_up_lands_1_8 <- dlc_tongue_up |> 
+    filter(knot == 8, time_int > start_of_vowel_within_annot_1-0.03, 
+           time_int < end_of_vowel_within_annot_1+0.03) |> 
+    reframe(
+      get_landmarks(Y_sm_up_vel, time_int, start_of_vowel_within_annot_1-0.03, end_of_vowel_within_annot_1+0.03),
+      .by = displ_id_client
+    )
+
+dlc_tongue_up |> 
+    filter(knot == 10, time_int > start_of_vowel_within_annot_1, 
+           time_int < end_of_vowel_within_annot_1, client == "en10" , word == "aggadic") |>
+    reframe(
+      max_disp <- get_zerocross(Y_sm_up_vel, time_int, start = start_of_vowel_within_annot_1, end = end_of_vowel_within_annot_1),
+      .by = displ_id_client
+    )
+
+dlc_up_lands_segmentinfo_1_8 <- landmarks_segmentinfo(dlc_up_lands_1_8, dlc_tongue_up)
+poa_na_summary(dlc_up_lands_segmentinfo_1_8,0,client,poa_C2)
+```
+
+### V2
+```{r}
+dlc_up_lands_2_8 <- dlc_tongue_up |> 
+    filter(knot == 8, time_int > end_of_vowel_within_annot_1, 
+           time_int < end_of_vowel_within_annot_2+0.03) |> 
+    reframe(
+      get_landmarks(Y_sm_up_vel, time_int, end_of_vowel_within_annot_1, end_of_vowel_within_annot_2+0.03),
+      .by = displ_id_client
+    )
+
+dlc_up_lands_segmentinfo_2_8 <- landmarks_segmentinfo(dlc_up_lands_2_8, dlc_tongue_up)
+poa_na_summary(dlc_up_lands_segmentinfo_2_8,0,client,poa_C2)
+```
+
+### Join landmarks for V1 and V2 
+```{r}
+dlc_landmarks_full <- add_row(dlc_up_lands_segmentinfo_1_8 |>
+                                mutate(vowel_number = 1),
+                              dlc_up_lands_segmentinfo_2_8 |>
+                                mutate(vowel_number = 2))
+dlc_landmarks_full_wide <- dlc_landmarks_full |>
+  rename(date = date_time) |>
+  pivot_wider(
+    names_from = vowel_number,
+    values_from = 9:22
+    #ends_with("_time"|"_vel"|"_on"|"_off")
+  )
+dlc_landmarks_full_wide_8 <- dlc_landmarks_full_wide |>
+  mutate(max_disp_distance = max_disp_time_2 - max_disp_time_1)
+#write_csv(dlc_landmarks_full_wide,"../isochrony_data/export_isochrony_dlc/dlc_landmarks.csv")
+dlc_landmarks_full_wide <- read_csv("../isochrony_data/export_isochrony_dlc/dlc_landmarks.csv")
+
+#poa_na_summary(dlc_landmarks_full_wide,1,client,poa_C2)
+a8 <- dlc_landmarks_full_wide_8 |>
+  filter(group == 1 & poa_C2 != "bilabial") |>
+  group_by(client) |>
+  summarise_at(c("max_disp_time_1","max_disp_time_2","max_disp_distance"),~sum(is.na(.))) |>
+    left_join(y = dlc_landmarks_full_wide |>
+      filter(group == 1 & poa_C2 != "bilabial") |>
+      group_by(client) |>
+      tally(), by = join_by(client))
+left_join(a10, a8, by = join_by(client))
+```
+
+### Number of tokens per word (out of max.40)
+```{r}
+dlc_landmarks_full_wide <- dlc_landmarks_full_wide |>
+  mutate(GEST_ons_distance = GEST_ons_2 - GEST_ons_1,
+         peak_1_vel_distance = peak_1_time_2 - peak_1_time_1,
+         peak_2_vel_distance = peak_2_time_2 - peak_2_time_1,
+         stress_group = paste(stress,V1,V2,sep = "_"),
+         across_within = case_when(
+           (stress == "1020" | stress == "200")~"within",
+           (stress == "020" | stress == "0200")~"across"
+         ),
+         R = ifelse(R == 1, "Cr","C"),
+         voice_C2 = ifelse(voice_C2 == 1, "voiced","voiceless")) |>
+  relocate(.after = file) |>
+  filter(group == 1, client != "en21", poa_C2 != "bilabial") |>
+  left_join(y = participants |> select(id, dialect), by = join_by(client == id))
+
+dlc_landmarks_full_wide |> 
+  group_by(is.na(max_disp_distance),group) |>
+  count(word) |>
+  arrange(group,n)
+
+dlc_landmarks_full_wide |>
+  filter(is.na(max_disp_distance), client == "en10") |>
+  arrange(client)
+```
+
+### Statistics
+```{r}
+mdd_bm_5 <- brm(
+  max_disp_distance ~ across_within*R*voice_C2 + poa_C2 + (across_within:R:voice_C2 | client),
+  family = lognormal,
+  data = dlc_landmarks_full_wide |> drop_na(max_disp_distance),
+  seed = 1852,
+  file = "cache/mdd_bm_5"
+)
+summary(mdd_bm_5)
+
+god_bm_5 <- brm(
+  GEST_ons_distance ~ across_within*R*voice_C2 + poa_C2 + (across_within:R:voice_C2 | client),
+  family = lognormal,
+  data = dlc_landmarks_full_wide,
+  seed = 1852,
+  file = "cache/god_bm_5"
+)
+summary(god_bm_5)
+
+p1vd_bm_5 <- brm(
+  peak_1_vel_distance ~ across_within*R*voice_C2 + poa_C2 + (across_within:R:voice_C2 | client),
+  family = lognormal,
+  data = dlc_landmarks_full_wide,
+  seed = 1852,
+  file = "cache/p1vd_bm_5"
+)
+summary(p1vd_bm_5)
+p2vd_bm_5 <- brm(
+  peak_2_vel_distance ~ across_within*R*voice_C2 + poa_C2 + (across_within:R:voice_C2 | client),
+  family = lognormal,
+  data = dlc_landmarks_full_wide,
+  seed = 1852,
+  file = "cache/p2vd_bm_5"
+)
+summary(p2vd_bm_5)
+
+joint_bm_1 <- brm(
+  mvbind(max_disp_distance,GEST_ons_distance) ~ across_within*R*voice_C2 + poa_C2 + (across_within:R:voice_C2|p|client),
+  family = lognormal,
+  data = dlc_landmarks_full_wide,
+  seed = 1852,
+  file = "cache/joint_bm_1"
+)
+summary(joint_bm_1)
+
+
+dlc_landmarks_full_wide |> 
+  drop_na(max_disp_distance) |>
+  ggplot(aes(x = max_disp_distance, colour = as_factor(voice_C2))) +
+  geom_density() +
+  facet_wrap(~stress_group)
+
+dlc_landmarks_full_wide |>
+  ggplot(aes(x = max_disp_distance)) +
+  geom_density(fill = "red", alpha = 0.3)
+```
+
+### Acoustics
+```{r}
+acoustics_groups <- inner_join(vowel_acoustics_wide,dlc_landmarks_full_wide |> select(date,word,displ_id_client,dialect), by = join_by(date_time == date)) |>
+  left_join(y = word_segments, by = join_by(word)) |>
+  mutate(V_distance = startpoint_2 - startpoint_1,
+           stress_group = paste(stress,V1,V2,sep = "_"),
+         across_within = case_when(
+           (stress == "1020" | stress == "200")~"within",
+           (stress == "020" | stress == "0200")~"across"
+         ),
+         R = ifelse(R == 1, "Cr","C"),
+         voice_C2 = ifelse(voice_C2 == 1, "voiced","voiceless")) |>
+  filter(group == 1, participant != "en21", poa_C2 != "bilabial")
+
+ad_bm_5 <- brm(
+  V_distance ~ across_within*R*voice_C2 + poa_C2 + (across_within*R*voice_C2 | participant),
+  family = lognormal,
+  data = acoustics_groups,
+  seed = 1852,
+  cores = 4,
+  file = "cache/ad_bm_5"
+)
+summary(ad_bm_5)
+
+get_prior(V_distance ~ across_within*R*voice_C2 + V2 + poa_C2 + (across_within*R*voice_C2 | participant),
+  family = lognormal,
+  data = acoustics_groups)
+
+acoustics_groups |>
+  ggplot(aes(x = V_distance, colour = as_factor(voice_C2))) +
+  geom_density() +
+  facet_wrap(~stress_group)
+```
+
+```{r}
+summary(mdd_bm_2)
+summary(ad_bm_2)
+
+plot(mdd_bm_2, combo = c("dens", "trace"))
+plot(ad_bm_2, combo = c("dens", "trace"))
+posterior_summary(mdd_bm_2)
+
+conditional_effects(mdd_bm_2, effects = "across_within:voice_C2")
+mdd <- plot(conditional_effects(mdd_bm_3, effects = "across_within:R"), points = TRUE, point_args = list(width = 0.1))
+god <- plot(conditional_effects(god_bm_1, effects = "across_within:R"), points = TRUE, point_args = list(width = 0.1))
+p1vd <- plot(conditional_effects(p1vd_bm_1, effects = "across_within:R"), points = TRUE, point_args = list(width = 0.1))
+p2vd <- plot(conditional_effects(p2vd_bm_1, effects = "across_within:R"), points = TRUE, point_args = list(width = 0.1))
+
+ggarrange(mdd,god,p1vd,nrow = 1)
+avg_comparisons(mdd_bm_2, variables = "across_within:R")
+
+conditional_effects(ad_bm_2, effects = "across_within:R")
+plot(conditional_effects(ad_bm_2, effects = "across_within:voice_C2"), points = TRUE, point_args = list(width = 0.1))
+avg_comparisons(mdd_bm_2, variables = "across_within:R")
+as_draws_df(mdd_bm_3)
+```
+
+```{r}
+ad_bm_3 <- readRDS("C:/Users/DELL/OneDrive - University of Edinburgh/dissertation/isochrony_code/cache/ad_bm_3.rds")
+god_bm_1 <- readRDS("C:/Users/DELL/OneDrive - University of Edinburgh/dissertation/isochrony_code/cache/god_bm_1.rds")
+p1vd_bm_1 <- readRDS("C:/Users/DELL/OneDrive - University of Edinburgh/dissertation/isochrony_code/cache/p1vd_bm_1.rds")
+mdd_bm_3 <- readRDS("C:/Users/DELL/OneDrive - University of Edinburgh/dissertation/isochrony_code/cache/mdd_bm_3.rds")
+p2vd_bm_1 <- readRDS("C:/Users/DELL/OneDrive - University of Edinburgh/dissertation/isochrony_code/cache/p2vd_bm_1.rds")
+
+summary(ad_bm_3)
+```
+
+
+```{r}
+draws <- as_draws_df(ad_bm_4)
+
+draws_pred_across_R_09 <- draws |>
+  mutate(
+    C_across = exp(b_Intercept + `r_participant[en09,Intercept]`),
+    C_across_Vless = exp(b_Intercept + `r_participant[en09,Intercept]`+`b_voice_C2voiceless` +`r_participant[en09,voice_C2voiceless]`),
+    Cr_across = exp(b_Intercept + `r_participant[en09,Intercept]`+ b_RCr + `r_participant[en09,RCr]`),
+    Cr_across_Vless = exp(b_Intercept + `r_participant[en09,Intercept]`+ b_RCr + `r_participant[en09,RCr]` + `b_voice_C2voiceless`+`r_participant[en09,voice_C2voiceless]` + `b_RCr:voice_C2voiceless` + `r_participant[en09,RCr:voice_C2voiceless]`),
+    C_within = exp(b_Intercept + `r_participant[en09,Intercept]`+ `b_across_withinwithin`+ `r_participant[en09,across_withinwithin]`),
+    C_within_Vless = exp(b_Intercept + `r_participant[en09,Intercept]`+ `b_across_withinwithin`+ `r_participant[en09,across_withinwithin]` + `b_voice_C2voiceless`+`r_participant[en09,voice_C2voiceless]` + `b_across_withinwithin:voice_C2voiceless`+ `r_participant[en09,across_withinwithin:voice_C2voiceless]`),
+    Cr_within = exp(b_Intercept + `r_participant[en09,Intercept]`+ `b_across_withinwithin`+ `r_participant[en09,across_withinwithin]` + b_RCr + `r_participant[en09,RCr]`+ `b_across_withinwithin:RCr`+ `r_participant[en09,across_withinwithin:RCr]`),
+    Cr_within_Vless = exp(b_Intercept + `r_participant[en09,Intercept]`+ `b_across_withinwithin`+ `r_participant[en09,across_withinwithin]` + b_RCr + `r_participant[en09,RCr]`+ `b_voice_C2voiceless`+`r_participant[en09,voice_C2voiceless]` + `b_RCr:voice_C2voiceless`+ `r_participant[en09,RCr:voice_C2voiceless]`+ `b_across_withinwithin:voice_C2voiceless`+ `r_participant[en09,across_withinwithin:voice_C2voiceless]`+ `b_across_withinwithin:RCr` +`r_participant[en09,across_withinwithin:RCr]`+`b_across_withinwithin:RCr:voice_C2voiceless`+ `r_participant[en09,across_withinwithin:RCr:voice_C2voiceless]`)
+    )
+draws_long_across_R_09 <- draws_pred_across_R_09 |> 
+  select(.chain, .iteration, .draw, starts_with("C")) |> 
+  pivot_longer(C_across:Cr_within_Vless, names_to = "aw_RCr_voice", values_to = "pred") |>
+  mutate(across = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_across_Vless","Cr_across_Vless"),"across","within"),
+         R = ifelse(aw_RCr_voice %in% c("C_across","C_within","C_across_Vless","C_within_Vless"),"C","Cr"),
+         voice = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_within","Cr_within"),"voiced","voiceless"))
+
+draws_long_across_R_09 |> 
+  ggplot(aes(pred, R, fill = R)) +
+  stat_halfeye() +
+  labs(x = "Predicted distance between first and second vowel", y = "cluster?") + 
+  facet_grid(vars(voice),vars(across)) +
+  xlim(0.1,0.4) +
+  guides(position = NULL)
+```
+
+```{r}
+post_dist_from_bm <- function(bm) {
+  draws <- as_draws_df(bm)
+
+  draws_pred_across_R <- draws |>
+    mutate(
+      C_across = exp(b_Intercept),
+      C_across_Vless = exp(b_Intercept + `b_voice_C2voiceless`),
+      Cr_across = exp(b_Intercept + b_RCr),
+      Cr_across_Vless = exp(b_Intercept + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless`),
+      C_within = exp(b_Intercept + `b_across_withinwithin`),
+      C_within_Vless = exp(b_Intercept + `b_across_withinwithin` + `b_voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless`),
+      Cr_within = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_across_withinwithin:RCr`),
+      Cr_within_Vless = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless` + `b_across_withinwithin:RCr` + `b_across_withinwithin:RCr:voice_C2voiceless`)
+      )
+  draws_long_across_R <- draws_pred_across_R |> 
+    select(.chain, .iteration, .draw, starts_with("C")) |> 
+    pivot_longer(C_across:Cr_within_Vless, names_to = "aw_RCr_voice", values_to = "pred") |>
+    mutate(across = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_across_Vless","Cr_across_Vless"),"across","within"),
+           R = ifelse(aw_RCr_voice %in% c("C_across","C_within","C_across_Vless","C_within_Vless"),"C","Cr"),
+           voice = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_within","Cr_within"),"voiced","voiceless"))
+  
+  draws_long_across_R |> 
+    ggplot(aes(pred, R, fill = R)) +
+    stat_halfeye() +
+    labs(x = "Predicted distance between first and second vowel", y = "cluster?") + 
+    facet_grid(vars(voice),vars(across)) +
+    xlim(0.1,0.4) +
+    guides(position = NULL)
+}
+post_dist_from_bm(ad_bm_4)
+post_dist_from_bm(god_bm_4)
+post_dist_from_bm(p1vd_bm_4)
+post_dist_from_bm(mdd_bm_4)
+post_dist_from_bm(p2vd_bm_4)
+```
+
+```{r}
+post_dist_from_bm <- function(bm) {
+  draws <- as_draws_df(bm)
+
+  draws_pred_across_R <- draws |>
+    mutate(
+      C_across = exp(b_Intercept),
+      C_across_Vless = exp(b_Intercept + `b_voice_C2voiceless`),
+      Cr_across = exp(b_Intercept + b_RCr),
+      Cr_across_Vless = exp(b_Intercept + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless`),
+      C_within = exp(b_Intercept + `b_across_withinwithin`),
+      C_within_Vless = exp(b_Intercept + `b_across_withinwithin` + `b_voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless`),
+      Cr_within = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_across_withinwithin:RCr`),
+      Cr_within_Vless = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless` + `b_across_withinwithin:RCr` + `b_across_withinwithin:RCr:voice_C2voiceless`),
+      
+      C_across_velar = exp(b_Intercept + `b_poa_C2velar`),
+      C_across_Vless_velar = exp(b_Intercept + `b_voice_C2voiceless` + `b_poa_C2velar`),
+      Cr_across_velar = exp(b_Intercept + b_RCr + `b_poa_C2velar`),
+      Cr_across_Vless_velar = exp(b_Intercept + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless` + `b_poa_C2velar`),
+      C_within_velar = exp(b_Intercept + `b_across_withinwithin` + `b_poa_C2velar`),
+      C_within_Vless_velar = exp(b_Intercept + `b_across_withinwithin` + `b_voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless` + `b_poa_C2velar`),
+      Cr_within_velar = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_across_withinwithin:RCr` + `b_poa_C2velar`),
+      Cr_within_Vless_velar = exp(b_Intercept + `b_across_withinwithin` + b_RCr + `b_voice_C2voiceless` + `b_RCr:voice_C2voiceless` + `b_across_withinwithin:voice_C2voiceless` + `b_across_withinwithin:RCr` + `b_across_withinwithin:RCr:voice_C2voiceless` + `b_poa_C2velar`),
+      )
+  draws_long_across_R <- draws_pred_across_R |> 
+    select(.chain, .iteration, .draw, starts_with("C")) |> 
+    pivot_longer(C_across:Cr_within_Vless_velar, names_to = "aw_RCr_voice", values_to = "pred") |>
+    mutate(across = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_across_Vless","Cr_across_Vless",
+                           "C_across_velar","Cr_across_velar","C_across_Vless_velar","Cr_across_Vless_velar"),
+                           "across","within"),
+           R = ifelse(aw_RCr_voice %in% c("C_across","C_within","C_across_Vless","C_within_Vless",
+                                          "C_across_velar","C_within_velar","C_across_Vless_velar","C_within_Vless_velar"),
+                            "C","Cr"),
+           voice = ifelse(aw_RCr_voice %in% c("C_across","Cr_across","C_within","Cr_within",
+                                              "C_across_velar","Cr_across_velar","C_within_velar","Cr_within_velar"),
+                            "voiced","voiceless"),
+           poa_C2 = ifelse(aw_RCr_voice %in% c("C_across","C_within","Cr_across","Cr_within",
+                                               "C_across_Vless","C_within_Vless","Cr_across_Vless","Cr_within_Vless"),
+                            "alveolar","velar")
+          )
+  draws_long_across_R |> 
+    ggplot(aes(pred, voice, fill = voice)) +
+    stat_halfeye() +
+    labs(x = "Predicted distance between first and second vowel", y = "cluster?") + 
+    facet_grid(vars(R),vars(across)) +
+    xlim(0.1,0.4) +
+    guides(position = NULL)
+}
+post_dist_from_bm(ad_bm_5)
+post_dist_from_bm(god_bm_4)
+post_dist_from_bm(p1vd_bm_4)
+post_dist_from_bm(mdd_bm_5)
+post_dist_from_bm(p2vd_bm_4)
+```
+
