@@ -15,32 +15,40 @@ library(modelbased)
 library(posterior)
 library(ggdist)
 library(marginaleffects)
+library(quantmod)
+library(ggh4x)
 ```
 
 
 ## Read UTI data
 ```{r, message=FALSE}
-folder_path <- "../isochrony_data/export_isochrony_dlc"
+folder_path <- "../data/export_isochrony_dlc"
 dlc_data <- read_rds(paste0(folder_path,"/dlc_data.rds"))
-unique(dlc_data |> group_by(frame_id) |> count(client))
 
 less_than_7_frames <- c(paste(2073:2076,"en14",sep = "_"),
                         paste(3376:3422,"en18",sep = "_"))
+dlc_data |> 
+  filter(spline == "DLC_Tongue") |> 
+  count(displ_id, client, Prompt, knot)
+
 dlc_data <- dlc_data |>
   group_by(client) |>
-  mutate(displ_id = displ_id - min(displ_id)+1,
-         frame_id = frame_id - min(frame_id)+1,
-         displ_id_client = paste(displ_id, client, sep = "_"),
-         frame_id_client = paste(frame_id, client, sep = "_")) |>
+  mutate(
+    displ_id = displ_id - min(displ_id)+1,
+    frame_id = frame_id - min(frame_id)+1,
+    displ_id_client = paste(displ_id, client, sep = "_"),
+    frame_id_client = paste(frame_id, client, sep = "_")
+  ) |>
   ungroup()
+
 dlc_data_displ <- dlc_data |>
     filter(!(frame_id_client %in% less_than_7_frames))
 
 dates_to_filter <- dlc_data |>
   filter((client == "en14" & frame_id == 2073) | (client == "en18" & frame_id == 3376) |
            (client == "en11" & displ_id %in% c(635,2234)) | (client == "en01" & displ_id %in% c(1310,2225))) |>
-  select(date_time) |>
-  unique()
+  distinct(date_time) |> 
+  pull()
 ```
 
 ## Read data on vowels 
@@ -61,26 +69,32 @@ vowel_start_end_wide_01 <- vowel_start_end_01 |>
       values_from = ends_with("_of_vowel_within_annot"),
     )
 vowel_start_end_wide_01 <- vowel_start_end_wide_01 |> 
-  filter(!(vowel_start_end_wide_01$date_time %in% dates_to_filter$date_time))
+  filter(!date_time %in% dates_to_filter)
 
 vowel_acoustics <- read_csv(paste0(folder_path,"/vowel_acoustic_distance_start.csv"))
 vowel_acoustics_wide <- vowel_acoustics |>
     pivot_wider(
       names_from = n_of_vowel, 
-      values_from = c(startpoint,duration),
+      values_from = c(startpoint, duration),
     )
 vowel_acoustics_wide <- vowel_acoustics_wide |> 
-  filter(!(vowel_acoustics_wide$date_time %in% dates_to_filter$date_time))
+  filter(!date_time %in% dates_to_filter)
 
-word_segments <- read_csv("../isochrony_data/stimuli/isochrony_wlist_vowels.csv")
+word_segments <- read_csv("../data/stimuli/isochrony_wlist_vowels.csv")
 word_segments <- word_segments |>
-  mutate(poa_C2 = case_when((C2 == "p" | C2 == "b")~"bilabial",
-                            (C2 == "t" | C2 == "d")~"alveolar",
-                            (C2 == "k" | C2 == "g")~"velar"),
-         voice_C2 = case_when((C2 %in% c("b","d","g"))~1,
-                              (C2 %in% c("p","t","k"))~0))
+  mutate(
+    poa_C2 = case_when(
+                C2 == "p" | C2 == "b" ~ "bilabial",
+                C2 == "t" | C2 == "d" ~ "alveolar",
+                C2 == "k" | C2 == "g" ~ "velar",
+             ),
+    voice_C2 = case_when(
+                C2 %in% c("b","d","g") ~ 1,
+                C2 %in% c("p","t","k") ~ 0,
+    )
+  )
 
-participants <- read_csv(paste0(folder_path,"/../participants.csv"))
+participants <- read_csv(paste0(folder_path, "/../participants.csv"))
 participants <- participants |>
   mutate(id = paste0("en", id))
 
@@ -107,7 +121,7 @@ dlc_data |>
 dlc_tongue <- dlc_data_displ |> 
   filter(spline == "DLC_Tongue")
 
-### smooth
+y### smooth
 dlc_tongue <- dlc_tongue |> 
   mutate(
     Y_sm = filter_signal(Y, order = 2, window_length = 7, apply = 2),
@@ -124,7 +138,7 @@ dlc_tongue_up <- dlc_tongue |>
 ### join back other variables
 dlc_tongue_up <- dlc_tongue_up |> 
   left_join(y = dlc_tongue |> select(client, date_time, Prompt, spline, knot, displ_id, word, displ_id_client) |> distinct()) |> 
-  rename(Y_sm_up = signal_int)
+  rename(Y_sm_up = signal_int, prompt = Prompt)
 
 ### smooth
 dlc_tongue_up <- dlc_tongue_up |> 
@@ -134,24 +148,35 @@ dlc_tongue_up <- dlc_tongue_up |>
   )
 
 ### join vowel interval info
-dlc_tongue_up <- left_join(dlc_tongue_up |> select(-c(Prompt, spline)) |> distinct(), vowel_start_end_wide_01 |> select(-stimulus) |> distinct(), by = join_by(date_time))
-
+dlc_tongue_up <- left_join(dlc_tongue_up |> 
+                             select(-c(prompt, spline)) |> 
+                             distinct(), 
+                           vowel_start_end_wide_01 |> 
+                             select(-stimulus) |> 
+                             distinct(), 
+                           by = join_by(date_time)
+                 )
 no_V1 <- dlc_tongue_up |>
   filter(is.na(start_of_vowel_within_annot_1)) |>
-  select(date_time,word,file,client) |>
-  unique()
+  distinct(date_time,word,file,client)
+
 no_V2 <- dlc_tongue_up |>
   filter(is.na(start_of_vowel_within_annot_2)) |>
-  select(date_time,word,file,client) |>
-  unique()
+  distinct(date_time,word,file,client)
 
 dlc_tongue_up <- dlc_tongue_up |>
   filter(!(date_time %in% no_V1$date_time | date_time %in% no_V2$date_time))
 
 dlc_tongue_up <- dlc_tongue_up |>
-  mutate(across(
-    .cols = c(start_of_vowel_within_annot_1,end_of_vowel_within_annot_1,start_of_vowel_within_annot_2,end_of_vowel_within_annot_2), round, 2,
-    .names = "{.col}_round"
+  mutate(
+    across(
+      .cols = c(start_of_vowel_within_annot_1, 
+              end_of_vowel_within_annot_1,
+              start_of_vowel_within_annot_2,
+              end_of_vowel_within_annot_2
+            ),
+      .fns = ~round(.x, 2),
+      .names = "{.col}_round"
     )
   ) |>
   rename(
@@ -172,11 +197,21 @@ dlc_tongue_up <- dlc_tongue_up |>
 
 ### Overview functions for landmarks
 ```{r}
-landmarks_segmentinfo <- function(lands, tongue_up) {left_join(lands, dlc_tongue_up |> select(displ_id_client,word,client,date_time,file,displ_id,start1_round,end1_round,start2_round,end2_round) |> distinct(), by = join_by(displ_id_client)) |> 
-  relocate(c(word,file,start1_round,end1_round,start2_round,end2_round), .after = displ_id_client) |>
+landmarks_segmentinfo <- function(lands, tongue_up) {left_join(lands, 
+                                                               dlc_tongue_up |> 
+                                                                 select(
+                                                                   displ_id_client, word,
+                                                                   client, date_time, file, displ_id,
+                                                                   start1_round, end1_round,
+                                                                   start2_round, end2_round
+                                                                  ) |> 
+                                                                 distinct(), 
+                                                               by = join_by(displ_id_client)
+  ) |> 
+  relocate(c(word, file, start1_round, end1_round, start2_round, end2_round), .after = displ_id_client) |>
   left_join(y = word_segments, by = join_by(word)) |>
   relocate(stress, .after = word) |>
-  arrange(group,stress,V2,poa_C2,voice_C2,R,word)
+  arrange(group, stress, V2, poa_C2, voice_C2, R, word)
 }
 poa_na_summary <- function(landmarks_segmentinfo,both = 1,var1,var2) {
   landmarks_segmentinfo |>
@@ -189,10 +224,230 @@ poa_na_summary <- function(landmarks_segmentinfo,both = 1,var1,var2) {
 ```
 
 ## Get landmarks for the whole dataset (1-23)
+
+```{r}
+alkalmaz_findPeaks <- function(signal) {
+  p_indices <- setdiff(findPeaks(signal), c(1, length(signal)))
+  out <- rep(FALSE, length(signal))
+  out[p_indices] <- TRUE
+  out
+}
+alkalmaz_findValleys <- function(signal) {
+  v_indices <- setdiff(findValleys(signal), c(1, length(signal)))
+  out <- rep(FALSE, length(signal))
+  out[v_indices] <- TRUE
+  out
+}
+
+edge_valleys <- function(y, is_peak, is_valley) {
+  n   <- length(y)
+  out <- rep(FALSE, n)
+  if (n >= 2) {
+    # first obs: neither peak nor valley, and the trace goes up afterwards
+    if (!is_peak[1] && !is_valley[1] && y[2] > y[1])         out[1] <- TRUE
+    # last obs: neither peak nor valley, and the trace came down into it
+    if (!is_peak[n] && !is_valley[n] && y[n - 1] > y[n])     out[n] <- TRUE
+  }
+  out
+}
+```
+
+# Best knot calculation for tip and dorsum
+
+```{r}
+pikek <- dlc_tongue_up |> 
+    mutate(
+      knot_type = case_when(
+        knot %in% 2:4 ~ "root",
+        knot %in% 5:7 ~ "dorsum",
+        knot %in% 8:10 ~ "tip",
+        TRUE ~ NA
+      ),
+      syll_aff = case_when(
+        time_int <= start_of_vowel_within_annot_2 ~ 1,
+        time_int <= start_of_vowel_within_annot_3 ~ 2,
+        TRUE ~ 3,
+      ),
+    ) |> 
+    group_by(client, word, syll_aff, knot_type, knot) |> 
+    mutate(
+      knot_sd = sd(Y_sm_up_sm, na.rm = T)
+    ) |> 
+    ungroup() |> 
+    (\(x){
+      y <- x |> 
+        distinct(client, word, date_time) |> 
+        arrange(client, word, date_time) |> 
+        group_by(client, word) |> 
+        mutate(rep = seq_along(date_time)) |> 
+        ungroup()
+      left_join(x, y)
+    })() |> 
+    left_join(word_segments |> select(word, poa_C2), by = join_by(word)) 
+    # filter(
+    #   (poa_C2 == "bilabial" & knot_type == "root") | 
+    #     (poa_C2 == "alveolar" & knot_type == "tip") | 
+    #     (poa_C2 == "velar" & knot_type == "dorsum") 
+    # )
+
+pikek |> 
+  distinct(client, poa_C2, knot, knot_type, syll_aff, knot_sd) |> 
+  group_by(client, knot_type) |> 
+  summarise(
+    max = max(knot_sd),
+    max_knot = knot[which(knot_sd == max(knot_sd))],
+    .groups = "drop"
+  ) |> 
+  count(knot_type, max_knot)
+    
+```
+
+# Minmax calculation a la PeakValley
+
+```{r}
+pikek_2 <- pikek |> 
+  group_by(client, knot) |>
+  mutate(
+    Y_sm_up_sm = scales::rescale(Y_sm_up_sm)
+  ) |> 
+  group_by(word, rep, .add = T) |> 
+  mutate(
+    is_peak = alkalmaz_findPeaks(Y_sm_up_sm),
+    is_valley = alkalmaz_findValleys(Y_sm_up_sm),
+  ) |> 
+  ungroup() |> 
+  select(-c(participant, Y_sm_up)) |> 
+  relocate(is_peak, is_valley, .before = client)
+```
+
+# 20% and 80% calculation
+
+```{r}
+mark_landmarks <- function(y, is_peak, is_valley, p = c(0.2, 0.8)) {
+  lab <- rep(NA_character_, length(y))
+  v   <- which(is_valley)
+  pk  <- which(is_peak)
+
+  lab[v]  <- "valley"
+  lab[pk] <- "peak"
+
+  # index of the sample in y[from:to] closest to target t
+  nearest <- function(t, from, to) from - 1 + which.min(abs(y[from:to] - t))
+
+  for (i in pk) {
+    v0 <- v[v < i]; v1 <- v[v > i]
+    if (!length(v0) || !length(v1)) next      # need a valley on both sides
+    v0 <- max(v0);  v1 <- min(v1)
+
+    # closing (rising): valley -> peak, first sample at/above each threshold
+    thr_c <- y[v0] + p * (y[i] - y[v0])
+    idx_c <- sapply(thr_c, nearest, from = v0, to = i)
+
+    # opening (falling): peak -> next valley, first sample at/below each threshold
+    thr_o <- y[v1] + rev(p) * (y[i] - y[v1])
+    idx_o <- sapply(thr_o, nearest, from = i, to = v1)
+
+    lab[idx_c] <- c("gest_on", "plat_on")
+    lab[idx_o] <- c("plat_off", "gest_off")
+  }
+  lab
+}
+```
+
+
+```{r}
+pikek_3 <- pikek_2 |> 
+  # select(displ_id_client, client, word, rep, knot, time_int, Y_sm_up_sm, is_peak, is_valley) |>
+  group_by(displ_id_client) |> 
+  mutate(
+    across(
+      .cols = c(is_peak, is_valley),
+      .fns = ~if_else(lead(.x), T, F, F), 
+      .names = "{.col}_2"
+    ),
+    is_valley_2 = is_valley_2 | edge_valleys(Y_sm_up_sm, is_peak_2, is_valley_2),
+    is_peak_max = ifelse(Y_sm_up_sm == max(Y_sm_up_sm), T, NA),
+    cycle = cumsum(is_valley_2),
+    landmark = mark_landmarks(Y_sm_up_sm, is_peak_2, is_valley_2),
+  ) |>  
+  group_by(cycle, .add = T) |> 
+  fill(is_peak_max, .direction = "updown") |> 
+  ungroup() |> 
+  mutate(
+    is_peak_max = ifelse(is.na(is_peak_max), F, is_peak_max)
+  ) |> 
+  select(-c(is_peak, is_valley))
+```
+
+
+```{r}
+cols <- ggsci::pal_jco()(4)[c(1, 2, 4, 3)]
+pikek_3 |> #distinct(client, word, knot, rep)
+  filter(
+    word %in% c("acrobatic", "academic", "aggravation", "agonistic"),
+    !client %in% c("en01", "en06", "en23"),
+    rep == 1,
+    knot %in% c(2,3,4,5),
+  ) |> 
+  ggplot(aes(time_int, Y_sm_up_sm, colour = factor(knot))) +
+  geom_point(size = 0.2) +
+  # geom_vline(aes(xintercept = ifelse(is_peak, #| is_valley,
+  #                                    time_int, NA))) +
+  geom_vline(aes(xintercept = start_of_vowel_within_annot_1), colour = "black") +
+  geom_vline(aes(xintercept = start_of_vowel_within_annot_2), colour = "black") +
+  geom_vline(aes(xintercept = start_of_vowel_within_annot_3), colour = "black") +
+  geom_vline(aes(xintercept = is_peak_2), colour = "red") +
+  geom_vline(aes(xintercept = is_valley_2), colour = "red") +
+  # ylim(-0.5,0.5) +
+  facet_grid(
+    client ~ factor(word),
+    scales = "free_y"
+  ) +
+  # scale_color_manual(values = cols)
+  ggsci::scale_color_jco()
+```
+
+# Landmarks to wide format
+
+```{r}
+landmarks_only_long <- pikek_3 |> 
+  filter(!is.na(landmark), !is.na(cycle)) |> 
+  mutate(
+    landmark = case_when(
+      landmark == "peak" ~ "max_disp",
+      landmark == "valley" ~ "min_disp",
+      TRUE ~ landmark
+    ),
+    landmark = factor(landmark,
+                      levels = c("min_disp", "gest_on", "plat_on", 
+                                 "max_disp", "plat_off", "gest_off")
+               ),
+  )
+
+too_many_landmarks <- landmarks_only_long |> 
+  count(displ_id_client, cycle, landmark) |>
+  filter(n > 1) |> 
+  pull(displ_id_client)
+  
+landmarks_wide <- landmarks_only_long |> 
+  filter(!displ_id_client %in% too_many_landmarks) |> 
+  rename(time = time_int, Y = Y_sm_up_sm) |> 
+  pivot_wider(
+    id_cols = c(displ_id_client, client, word, rep, knot, cycle, is_peak_max),
+    names_from = landmark,
+    values_from = c(time, Y),
+    names_glue  = "{landmark}_{.value}"
+  ) |> 
+  drop_na()
+
+landmarks_wide
+```
+
+# INNENTŐL A RÉGI
 ### V1
 ```{r,message=FALSE}
 #write_csv(dlc_tongue_up, "../isochrony_data/export_isochrony_dlc/dlc_tongue_up.csv")
-dlc_tongue_up <- read_csv("../isochrony_data/export_isochrony_dlc/dlc_tongue_up.csv")
+# dlc_tongue_up <- read_csv("../isochrony_data/export_isochrony_dlc/dlc_tongue_up.csv")
 
 dlc_up_lands_1_8 <- dlc_tongue_up |> 
     filter(knot == 8, time_int > start_of_vowel_within_annot_1-0.03, 
